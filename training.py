@@ -6,7 +6,7 @@ from utility import save_tokenizer
 import json
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras.layers.experimental.preprocessing import TextVectorization
+#from tensorflow.keras.layers.experimental.preprocessing import TextVectorization
 import numpy as np
 
 
@@ -25,7 +25,7 @@ print("Number of training samples: ", len(train_data))
 print("Number of validation samples: ", len(valid_data))
 
 # Define tokenizer of Text Dataset
-tokenizer = TextVectorization(
+tokenizer = keras.layers.TextVectorization(
     max_tokens=MAX_VOCAB_SIZE,
     output_mode="int",
     output_sequence_length=SEQ_LENGTH,
