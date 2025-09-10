@@ -2,16 +2,20 @@ import tensorflow as tf
 from tensorflow.keras import layers
 from tensorflow import keras
 from tensorflow.keras.applications import efficientnet
-from settings import *
+#from settings import *
 
-def get_cnn_model():
-    base_model = efficientnet.EfficientNetB0(
-        input_shape=(*IMAGE_SIZE, 3), include_top=False, weights="imagenet",
-    )
+cnn_model_dict = {
+    "EfficientNetB0": [efficientnet.EfficientNetB0, 1280],
+    "EfficientNetB3": [efficientnet.EfficientNetB3, 1536],
+    "EfficientNetB5": [efficientnet.EfficientNetB5, 2048],
+}
+def get_cnn_model(IMAGE_SIZE, cnnmodel="EfficientNetB0"):
+    (model, dim) = cnn_model_dict[cnnmodel]
+    base_model = model( input_shape=(*IMAGE_SIZE, 3), include_top=False, weights="imagenet",)
     # Freeze feature extractor layers
     base_model.trainable = False
     base_model_out = base_model.output
-    base_model_out = layers.Reshape((-1, 1280))(base_model_out)
+    base_model_out = layers.Reshape((-1, dim))(base_model_out)
     cnn_model = keras.models.Model(base_model.input, base_model_out)
     return cnn_model
 
@@ -61,7 +65,7 @@ class PositionalEmbedding(layers.Layer):
 
 
 class TransformerDecoderBlock(layers.Layer):
-    def __init__(self, embed_dim, ff_dim, num_heads, vocab_size, **kwargs):
+    def __init__(self, embed_dim, ff_dim, num_heads, vocab_size, seq_length, **kwargs):
         super().__init__(**kwargs)
         self.embed_dim = embed_dim
         self.ff_dim = ff_dim
@@ -81,7 +85,7 @@ class TransformerDecoderBlock(layers.Layer):
         self.layernorm_3 = layers.LayerNormalization()
 
         self.embedding = PositionalEmbedding(
-            embed_dim=EMBED_DIM, sequence_length=SEQ_LENGTH, vocab_size=self.vocab_size
+            embed_dim=embed_dim, sequence_length=seq_length, vocab_size=self.vocab_size
         )
         self.out = layers.Dense(self.vocab_size)
         self.dropout_1 = layers.Dropout(0.1)
@@ -149,13 +153,6 @@ class ImageCaptioningModel(keras.Model):
         self.acc_tracker = keras.metrics.Mean(name="accuracy")
         self.num_captions_per_image = num_captions_per_image
 
-
-    def call(self, inputs):
-        x = self.cnn_model(inputs[0])
-        x = self.encoder(x, False)
-        x = self.decoder(inputs[2],x,training=inputs[1],mask=None)
-        return x
-
     def calculate_loss(self, y_true, y_pred, mask):
         loss = self.loss(y_true, y_pred)
         mask = tf.cast(mask, dtype=loss.dtype)
@@ -169,7 +166,99 @@ class ImageCaptioningModel(keras.Model):
         mask = tf.cast(mask, dtype=tf.float32)
         return tf.reduce_sum(accuracy) / tf.reduce_sum(mask)
 
+    ## save_weight でエラーになる。
+    ## train_step/test_step で call(自分自身)を呼び出すように修正
+    ## train_step/test_step から call されてもいいように call も修正
+    def call(self, inputs, training=False):
+        # inputsは (画像, キャプション) のタプルと想定
+        img_input, seq_input = inputs
+
+        # 1. 画像をCNNとEncoderに通す
+        img_embed = self.cnn_model(img_input, training=training)
+        encoder_out = self.encoder(img_embed, training=training)
+
+        # 2. キャプションのマスクを作成
+        mask = tf.math.not_equal(seq_input, 0)
+        
+        # 3. Decoderに渡して予測を得る
+        decoder_out = self.decoder(
+            seq_input, encoder_out, training=training, mask=mask
+        )
+        return decoder_out
+
     def train_step(self, batch_data):
+        batch_img, batch_seq = batch_data
+        batch_loss = 0
+        batch_acc = 0
+
+        for i in range(self.num_captions_per_image):
+            with tf.GradientTape() as tape:
+                batch_seq_inp = batch_seq[:, i, :-1]
+                batch_seq_true = batch_seq[:, i, 1:]
+
+                # 修正したcallメソッドを呼び出す
+                batch_seq_pred = self((batch_img, batch_seq_inp), training=True)
+                
+                mask = tf.math.not_equal(batch_seq_inp, 0)
+                caption_loss = self.calculate_loss(batch_seq_true, batch_seq_pred, mask)
+                caption_acc = self.calculate_accuracy(batch_seq_true, batch_seq_pred, mask)
+
+                batch_loss += caption_loss
+                batch_acc += caption_acc
+            
+            train_vars = (
+                self.encoder.trainable_variables + self.decoder.trainable_variables
+            )
+            grads = tape.gradient(caption_loss, train_vars)
+            self.optimizer.apply_gradients(zip(grads, train_vars))
+
+        loss = batch_loss
+        acc = batch_acc / float(self.num_captions_per_image)
+
+        self.loss_tracker.update_state(loss)
+        self.acc_tracker.update_state(acc)
+        return {"loss": self.loss_tracker.result(), "acc": self.acc_tracker.result()}
+
+    def test_step(self, batch_data):
+        batch_img, batch_seq = batch_data
+        batch_loss = 0
+        batch_acc = 0
+
+        for i in range(self.num_captions_per_image):
+            batch_seq_inp = batch_seq[:, i, :-1]
+            batch_seq_true = batch_seq[:, i, 1:]
+
+            # 修正したcallメソッドを呼び出す
+            batch_seq_pred = self((batch_img, batch_seq_inp), training=False)
+
+            mask = tf.math.not_equal(batch_seq_inp, 0)
+            caption_loss = self.calculate_loss(batch_seq_true, batch_seq_pred, mask)
+            caption_acc = self.calculate_accuracy(batch_seq_true, batch_seq_pred, mask)
+
+            batch_loss += caption_loss
+            batch_acc += caption_acc
+        
+        loss = batch_loss
+        acc = batch_acc / float(self.num_captions_per_image)
+
+        self.loss_tracker.update_state(loss)
+        self.acc_tracker.update_state(acc)
+        return {"loss": self.loss_tracker.result(), "acc": self.acc_tracker.result()}
+
+    @property
+    def metrics(self):
+        # We need to list our metrics here so the `reset_states()` can be
+        # called automatically.
+        return [self.loss_tracker, self.acc_tracker]
+
+    """
+    def __call(self, inputs, training=False):
+        x = self.cnn_model(inputs[0])
+        x = self.encoder(x, False)
+        x = self.decoder(inputs[2],x,training=inputs[1],mask=None)
+        return x
+
+    def __train_step(self, batch_data):
         batch_img, batch_seq = batch_data
         batch_loss = 0
         batch_acc = 0
@@ -225,7 +314,7 @@ class ImageCaptioningModel(keras.Model):
         self.acc_tracker.update_state(acc)
         return {"loss": self.loss_tracker.result(), "acc": self.acc_tracker.result()}
 
-    def test_step(self, batch_data):
+    def __test_step(self, batch_data):
         batch_img, batch_seq = batch_data
         batch_loss = 0
         batch_acc = 0
@@ -266,9 +355,5 @@ class ImageCaptioningModel(keras.Model):
         self.loss_tracker.update_state(loss)
         self.acc_tracker.update_state(acc)
         return {"loss": self.loss_tracker.result(), "acc": self.acc_tracker.result()}
+    """
 
-    @property
-    def metrics(self):
-        # We need to list our metrics here so the `reset_states()` can be
-        # called automatically.
-        return [self.loss_tracker, self.acc_tracker]

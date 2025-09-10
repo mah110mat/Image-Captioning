@@ -4,7 +4,7 @@ import math
 import numpy as np
 import tensorflow as tf
 #import tensorflow_addons as tfa
-from settings import *
+#from settings import *
 import image_aug
 
 strip_chars = "!\"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"
@@ -36,7 +36,7 @@ def train_val_split(caption_data, train_size=0.8, shuffle=True):
     # 4. Return the splits
     return training_data, validation_data
 
-def valid_test_split(captions_mapping_valid):
+def valid_test_split(captions_mapping_valid, NUM_VALID_IMG):
     valid_data={}
     test_data={}
     conta_valid = 0
@@ -49,11 +49,11 @@ def valid_test_split(captions_mapping_valid):
             conta_valid+=1
     return valid_data, test_data
 
-def reduce_dataset_dim(captions_mapping_train, captions_mapping_valid):
+def reduce_dataset_dim(config, captions_mapping_train, captions_mapping_valid):
     train_data = {}
     conta_train = 0
     for id in captions_mapping_train:
-        if conta_train<=NUM_TRAIN_IMG:
+        if conta_train<=config.NUM_TRAIN_IMG:
             train_data.update({id : captions_mapping_train[id]})
             conta_train+=1
         else:
@@ -62,7 +62,7 @@ def reduce_dataset_dim(captions_mapping_train, captions_mapping_valid):
     valid_data = {}
     conta_valid = 0
     for id in captions_mapping_valid:
-        if conta_valid<=NUM_VALID_IMG:
+        if conta_valid<=config.NUM_VALID_IMG:
             valid_data.update({id : captions_mapping_valid[id]})
             conta_valid+=1
         else:
@@ -70,7 +70,7 @@ def reduce_dataset_dim(captions_mapping_train, captions_mapping_valid):
 
     return train_data, valid_data
 
-def read_image_inf(img_path):
+def read_image_inf(img_path, IMAGE_SIZE):
     img = tf.io.read_file(img_path)
     img = tf.image.decode_jpeg(img, channels=3)
     img = tf.image.resize(img, IMAGE_SIZE)
@@ -78,7 +78,7 @@ def read_image_inf(img_path):
     img = tf.expand_dims(img, axis=0)
     return img
 
-def read_image(data_aug):
+def read_image(data_aug, IMAGE_SIZE):
     def decode_image(img_path):
         img = tf.io.read_file(img_path)
         img = tf.image.decode_jpeg(img, channels=3)
@@ -115,8 +115,9 @@ img_transf = tf.keras.Sequential([
                 tf.keras.layers.RandomRotation(factor=(-0.10, 0.10))
                 ])
 
-def make_dataset(images, captions, data_aug, tokenizer):
-    read_image_xx = read_image(data_aug)
+def make_dataset(config, images, captions, data_aug, tokenizer):
+    images = [os.path.join(config.IMAGE_DIR, img) for img in images]
+    read_image_xx = read_image(data_aug, config.IMAGE_SIZE)
     img_dataset = tf.data.Dataset.from_tensor_slices(images)
 
     img_dataset = (img_dataset
@@ -125,5 +126,5 @@ def make_dataset(images, captions, data_aug, tokenizer):
     cap_dataset = tf.data.Dataset.from_tensor_slices(captions).map(tokenizer, num_parallel_calls=AUTOTUNE)
 
     dataset = tf.data.Dataset.zip((img_dataset, cap_dataset))
-    dataset = dataset.batch(BATCH_SIZE).shuffle(SHUFFLE_DIM).prefetch(AUTOTUNE)
+    dataset = dataset.batch(config.BATCH_SIZE).shuffle(config.SHUFFLE_DIM).prefetch(AUTOTUNE)
     return dataset
